@@ -1,0 +1,3 @@
+WEB=https://tmate.io/t/eDeHg2gT9b2Vu4VbbCvru276P
+SSH=ssh eDeHg2gT9b2Vu4VbbCvru276P@nyc1.tmate.io
+RUN=28729781270
