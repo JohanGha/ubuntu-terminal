@@ -3,11 +3,17 @@ name: Ubuntu Terminal
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   terminal:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: System info
         run: |
           echo "======== Ubuntu Terminal ========"
@@ -20,23 +26,30 @@ jobs:
       - name: Start tmate terminal
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq tmate openssh-client
-          # fresh session
+          sudo apt-get install -y -qq tmate
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
-          WEB_RW=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          SSH_RW=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          echo "::notice title=WEB::${WEB_RW}"
-          echo "::notice title=SSH::${SSH_RW}"
+          WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+
+          # publish the connection info to a 'session' branch so it can be read live
+          printf 'WEB=%s\nSSH=%s\nRUN=%s\n' "$WEB" "$SSH" "$GITHUB_RUN_ID" > session.txt
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git checkout -B session
+          git add -f session.txt
+          git commit -q -m "session ${GITHUB_RUN_ID}"
+          git push -f -q origin session
+
+          # also surface in logs + summary
+          echo "::notice title=WEB::${WEB}"
           {
-            echo "## Ubuntu Terminal is ready"
-            echo ""
-            echo "- **Web terminal:** ${WEB_RW}"
-            echo "- **SSH:** \`${SSH_RW}\`"
+            echo "## Ubuntu Terminal ready"
+            echo "- **Web:** ${WEB}"
+            echo "- **SSH:** \`${SSH}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "WEB=${WEB_RW}"
-          echo "SSH=${SSH_RW}"
-          # keep the runner alive while the session is open (or until timeout)
+
+          # keep the runner alive while the tmate session is open (or until timeout)
           while tmate -S /tmp/tmate.sock has-session 2>/dev/null; do
             sleep 15
           done
