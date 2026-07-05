@@ -1,0 +1,73 @@
+name: Ubuntu Terminal (ngrok)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  terminal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      # public key is safe to expose; only the matching private key can connect
+      PUBKEY: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFdhsD0YThETkGJQrreVCFjm1m1NhMXeBcWsZbt0RFcr ubuntu-terminal-ngrok"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: SSH over ngrok
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          set -e
+          # --- install openssh-server + ngrok ---
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server jq
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/ngrok.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/ngrok.gpg] https://ngrok-agent.s3.amazonaws.com buster main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list >/dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq ngrok
+
+          # --- authorize our key for the 'runner' user ---
+          mkdir -p /home/runner/.ssh
+          echo "$PUBKEY" > /home/runner/.ssh/authorized_keys
+          chmod 700 /home/runner/.ssh
+          chmod 600 /home/runner/.ssh/authorized_keys
+          chown -R runner:runner /home/runner/.ssh
+
+          # --- harden + start sshd (key-only, no passwords) ---
+          sudo sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+          sudo sed -i 's/#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+          sudo mkdir -p /run/sshd
+          sudo service ssh restart || sudo /usr/sbin/sshd
+
+          # --- start ngrok tcp tunnel to sshd ---
+          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+          nohup ngrok tcp 22 --log stdout --log-format logfmt > /tmp/ngrok.log 2>&1 &
+          # wait for the tunnel to come up
+          for i in $(seq 1 20); do
+            sleep 3
+            URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url // empty')
+            [ -n "$URL" ] && break
+          done
+          if [ -z "$URL" ]; then echo "ngrok failed to start"; cat /tmp/ngrok.log; exit 1; fi
+
+          HP=${URL#tcp://}; HOST=${HP%:*}; PORT=${HP#*:}
+
+          # --- publish connection info (no secrets: host:port only) ---
+          printf 'SSH=ssh -i ~/.ssh/ubuntu-terminal -p %s runner@%s\nHOST=%s\nPORT=%s\nRUN=%s\n' \
+            "$PORT" "$HOST" "$HOST" "$PORT" "$GITHUB_RUN_ID" > session.txt
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git checkout -B session
+          git add -f session.txt
+          git commit -q -m "ngrok session ${GITHUB_RUN_ID}"
+          git push -f -q origin session
+          echo "READY: $URL"
+
+          # keep the runner alive (until timeout or manual cancel)
+          while true; do sleep 30; done
